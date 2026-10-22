@@ -1,0 +1,72 @@
+---
+- name: Block the emSign ECC G3 and Comodo AAA root certificates
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    blocked_certificates:
+      - object: emSign%20ECC%20Root%20CA%20-%20G3
+        filename: emSign_ECC_Root_CA_-_G3.pem
+      - object: Comodo%20AAA%20Services%20root
+        filename: Comodo_AAA_Services_root.pem
+
+  tasks:
+    - name: Check for the preferred blocklist directory
+      ansible.builtin.stat:
+        path: /etc/pki/ca-trust/source/blocklist
+      register: blocklist_directory
+
+    - name: Select the blocklist directory with the legacy fallback
+      ansible.builtin.set_fact:
+        certificate_blocklist_path: >-
+          {{ '/etc/pki/ca-trust/source/blocklist'
+             if blocklist_directory.stat.isdir | default(false)
+             else '/etc/pki/ca-trust/source/blacklist' }}
+
+    - name: Check the selected directory
+      ansible.builtin.stat:
+        path: "{{ certificate_blocklist_path }}"
+      register: selected_directory
+
+    - name: Require an existing CA trust blocklist directory
+      ansible.builtin.assert:
+        that:
+          - selected_directory.stat.isdir | default(false)
+        fail_msg: Neither the blocklist nor the legacy blacklist directory exists.
+
+    - name: Extract the root certificates from the trust store
+      ansible.builtin.command:
+        argv:
+          - trust
+          - extract
+          - --overwrite
+          - --format=pem-bundle
+          - "--filter=pkcs11:object={{ item.object }};type=cert"
+          - "{{ certificate_blocklist_path }}/{{ item.filename }}"
+      loop: "{{ blocked_certificates }}"
+      loop_control:
+        label: "{{ item.filename }}"
+      changed_when: true
+
+    - name: Reject all extended key usages for the extracted certificates
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ certificate_blocklist_path }}/{{ item.filename }}"
+          - -out
+          - "{{ certificate_blocklist_path }}/{{ item.filename }}"
+          - -trustout
+          - -addreject
+          - anyExtendedKeyUsage
+      loop: "{{ blocked_certificates }}"
+      loop_control:
+        label: "{{ item.filename }}"
+      changed_when: true
+
+    - name: Rebuild the system CA trust store
+      ansible.builtin.command:
+        argv:
+          - update-ca-trust
+      changed_when: true
